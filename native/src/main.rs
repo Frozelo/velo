@@ -20,7 +20,7 @@ use std::{
         mpsc,
     },
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 #[derive(Clone, Copy, PartialEq)]
@@ -112,39 +112,93 @@ fn held() -> Result<()> {
     thread::spawn(move || {
         let mut client = None;
         while jobs.recv().is_ok() {
+            let mut saved_session = None;
+            let mut report = serde_json::json!({"outcome":"failed", "stage":"capture"});
             let result: Result<()> = (|| {
                 let target = linux::focused_window();
+                report["target_window_id"] = target
+                    .as_ref()
+                    .and_then(|w| w.get("id"))
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                let started = Instant::now();
                 let pcm = audio::capture(recording_stop.clone(), Duration::from_secs(120))?;
+                let captured = Instant::now();
                 let session = save_recording(&pcm)?;
+                saved_session = Some(session.clone());
+                report["audio_seconds"] = serde_json::json!(pcm.len() as f64 / 32000.0);
+                report["capture_seconds"] = serde_json::json!(started.elapsed().as_secs_f64());
                 if cancelled.load(Ordering::Relaxed) {
+                    report["outcome"] = serde_json::json!("cancelled_before_api");
                     return Ok(());
                 }
                 let _ = worker_events.send(Event::Phase(Phase::Processing));
+                report["stage"] = serde_json::json!("api");
                 if client.is_none() {
                     client = Some(api::Api::new()?);
                 }
-                let transcript = client
-                    .as_mut()
-                    .unwrap()
-                    .transcribe(&audio::wav(&pcm))
-                    .with_context(|| format!("Recording retained at {}", session.display()))?;
+                let api_started = Instant::now();
+                let api = client.as_mut().unwrap();
+                let response = api.transcribe(&audio::wav(&pcm), &cancelled);
+                report["api_attempts"] = serde_json::json!(api.attempts);
+                report["api_seconds"] = serde_json::json!(api_started.elapsed().as_secs_f64());
+                let transcript = match response {
+                    Ok(transcript) => transcript,
+                    Err(_) if cancelled.load(Ordering::Relaxed) => {
+                        report["outcome"] = serde_json::json!("cancelled_during_api");
+                        return Ok(());
+                    }
+                    Err(error) => {
+                        report["api_error"] = serde_json::json!(error.to_string());
+                        return Err(error).with_context(|| {
+                            format!("Recording retained at {}", session.display())
+                        });
+                    }
+                };
+                report["provider"] = serde_json::json!(transcript.provider);
+                report["model"] = serde_json::json!(transcript.model);
+                report["stage"] = serde_json::json!("delivery");
                 let result = serde_json::json!({"text": transcript.text, "provider": transcript.provider, "model": transcript.model, "usage": transcript.usage});
                 private_write(&session.join("result.json"), &serde_json::to_vec(&result)?)?;
                 fs::remove_file(session.join("audio.wav"))?;
                 if !cancelled.load(Ordering::Relaxed) {
-                    let pasted = linux::paste(result["text"].as_str().unwrap(), &target)?;
+                    let delivery =
+                        linux::paste(result["text"].as_str().unwrap(), &target, &cancelled)?;
+                    report["delivery_reason"] = serde_json::json!(delivery.reason);
+                    report["delivery_checked_window_ids"] =
+                        serde_json::json!(delivery.checked_windows);
+                    let pasted = delivery.pasted;
+                    report["outcome"] = serde_json::json!(if delivery.reason == "cancelled" {
+                        "cancelled_during_delivery"
+                    } else if pasted {
+                        "paste_requested"
+                    } else {
+                        "clipboard_only"
+                    });
                     println!(
                         "Velo native: {} via {}",
                         if pasted {
                             "paste requested"
                         } else {
-                            "copied only (focus changed)"
+                            delivery.reason
                         },
                         transcript.provider
                     );
+                } else {
+                    report["outcome"] = serde_json::json!("cancelled_after_api");
                 }
+                report["capture_end_to_result_seconds"] =
+                    serde_json::json!(captured.elapsed().as_secs_f64());
                 Ok(())
             })();
+            if let Some(session) = saved_session
+                && let Err(error) = private_write(
+                    &session.join("report.json"),
+                    &serde_json::to_vec(&report).unwrap(),
+                )
+            {
+                eprintln!("Native diagnostics could not be saved: {error}");
+            }
             let _ = match result {
                 Ok(()) => worker_events.send(Event::Phase(Phase::Ready)),
                 Err(error) => worker_events.send(Event::Error(format!("{error:#}"))),

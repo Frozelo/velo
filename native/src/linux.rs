@@ -4,6 +4,7 @@ use serde_json::Value;
 use std::{
     io::Write,
     process::{Command, Stdio},
+    sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
 
@@ -15,7 +16,9 @@ pub fn focused_window() -> Option<Value> {
     if !output.status.success() {
         return None;
     }
-    serde_json::from_slice(&output.stdout).ok()
+    let window: Value = serde_json::from_slice(&output.stdout).ok()?;
+    window.get("id")?.as_u64()?;
+    Some(window)
 }
 
 pub fn listen(mut event: impl FnMut(bool)) -> Result<()> {
@@ -38,7 +41,34 @@ pub fn listen(mut event: impl FnMut(bool)) -> Result<()> {
     }
 }
 
-pub fn paste(text: &str, target: &Option<Value>) -> Result<bool> {
+pub struct Delivery {
+    pub pasted: bool,
+    pub reason: &'static str,
+    pub checked_windows: Vec<Option<u64>>,
+}
+
+fn window_id(window: &Option<Value>) -> Option<u64> {
+    window.as_ref()?.get("id")?.as_u64()
+}
+
+fn denied(target: Option<u64>, current: Option<u64>) -> Option<&'static str> {
+    match (target, current) {
+        (None, _) => Some("target_window_unknown"),
+        (_, None) => Some("current_window_unknown"),
+        (Some(a), Some(b)) if a != b => Some("window_changed"),
+        _ => None,
+    }
+}
+
+pub fn paste(text: &str, target: &Option<Value>, cancelled: &AtomicBool) -> Result<Delivery> {
+    let mut delivery = Delivery {
+        pasted: false,
+        reason: "cancelled",
+        checked_windows: Vec::new(),
+    };
+    if cancelled.load(Ordering::Relaxed) {
+        return Ok(delivery);
+    }
     let mut copy = Command::new("wl-copy")
         .arg("--")
         .stdin(Stdio::piped())
@@ -50,15 +80,14 @@ pub fn paste(text: &str, target: &Option<Value>) -> Result<bool> {
     if !copy.wait()?.success() {
         bail!("Clipboard copy failed")
     }
-    let Some(window) = focused_window() else {
-        return Ok(false);
-    };
-    let Some(target) = target else {
-        return Ok(false);
-    };
-    if window["id"] != target["id"] {
-        return Ok(false);
+    let window = focused_window();
+    let target_id = window_id(target);
+    delivery.checked_windows.push(window_id(&window));
+    if let Some(reason) = denied(target_id, window_id(&window)) {
+        delivery.reason = reason;
+        return Ok(delivery);
     }
+    let window = window.unwrap();
     let terminal = matches!(
         window["app_id"]
             .as_str()
@@ -78,9 +107,15 @@ pub fn paste(text: &str, target: &Option<Value>) -> Result<bool> {
         .with_keys(&keys)?
         .build()?;
     std::thread::sleep(Duration::from_millis(150));
-    // Check again after device registration before injecting keys.
-    if focused_window().as_ref().map(|w| &w["id"]) != Some(&target["id"]) {
-        return Ok(false);
+    // Record the exact decision point, not a separate earlier snapshot.
+    let current_id = window_id(&focused_window());
+    delivery.checked_windows.push(current_id);
+    if let Some(reason) = denied(target_id, current_id) {
+        delivery.reason = reason;
+        return Ok(delivery);
+    }
+    if cancelled.load(Ordering::Relaxed) {
+        return Ok(delivery);
     }
     let mut pressed = vec![KeyCode::KEY_LEFTCTRL];
     if terminal {
@@ -98,7 +133,9 @@ pub fn paste(text: &str, target: &Option<Value>) -> Result<bool> {
             .map(|k| InputEvent::new(EventType::KEY.0, k.code(), 0)),
     );
     keyboard.emit(&events)?;
-    Ok(true)
+    delivery.pasted = true;
+    delivery.reason = "keys_sent";
+    Ok(delivery)
 }
 
 pub fn check_input() -> Result<()> {
@@ -113,4 +150,26 @@ pub fn check_input() -> Result<()> {
         .context("No access to /dev/uinput")?;
     println!("uinput: writable");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn focus_decision_explains_unknown_changed_and_same_windows() {
+        assert_eq!(super::denied(None, None), Some("target_window_unknown"));
+        assert_eq!(
+            super::denied(Some(20), None),
+            Some("current_window_unknown")
+        );
+        assert_eq!(super::denied(Some(20), Some(21)), Some("window_changed"));
+        assert_eq!(super::denied(Some(20), Some(20)), None);
+    }
+    #[test]
+    fn pre_cancelled_delivery_does_not_touch_clipboard_or_keyboard() {
+        let cancelled = std::sync::atomic::AtomicBool::new(true);
+        let result = super::paste("do not paste", &None, &cancelled).unwrap();
+        assert!(!result.pasted);
+        assert_eq!(result.reason, "cancelled");
+        assert!(result.checked_windows.is_empty());
+    }
 }
