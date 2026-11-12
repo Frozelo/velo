@@ -13,6 +13,21 @@ use std::{
 
 pub const RATE: u32 = 16_000;
 const MAX_BYTES: usize = RATE as usize * 2 * 120;
+pub const MAX_WAV_BYTES: usize = MAX_BYTES + 44;
+
+/// Recovery accepts the exact bounded WAV format produced by native capture.
+pub fn validate_wav(bytes: &[u8]) -> Result<()> {
+    if bytes.len() < 46 || bytes.len() > MAX_WAV_BYTES || !(bytes.len() - 44).is_multiple_of(2) {
+        bail!("Повреждённая или слишком длинная аудиозапись");
+    }
+    let mut header = wav(&[]);
+    header[4..8].copy_from_slice(&((bytes.len() - 8) as u32).to_le_bytes());
+    header[40..44].copy_from_slice(&((bytes.len() - 44) as u32).to_le_bytes());
+    if bytes[..44] != header {
+        bail!("Неподдерживаемый формат сохранённой аудиозаписи");
+    }
+    Ok(())
+}
 
 /// Native PipeWire capture. Two-minute cap keeps this integration spike bounded.
 pub fn capture(stop: Arc<AtomicBool>, limit: Duration) -> Result<Vec<u8>> {

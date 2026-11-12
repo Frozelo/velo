@@ -137,6 +137,7 @@ pub struct Entry {
     pub id: String,
     pub path: PathBuf,
     pub report: Value,
+    pub recovery: Value,
     pub has_result: bool,
     pub has_audio: bool,
     pub issue: Option<String>,
@@ -144,7 +145,10 @@ pub struct Entry {
 
 impl Entry {
     pub fn outcome(&self) -> &str {
-        self.report["outcome"].as_str().unwrap_or("unknown")
+        self.recovery["outcome"]
+            .as_str()
+            .or_else(|| self.report["outcome"].as_str())
+            .unwrap_or("unknown")
     }
 
     pub fn text(&self) -> Result<String> {
@@ -185,12 +189,22 @@ pub fn list(root: &Path, limit: usize) -> Result<Vec<Entry>> {
                 Err(_) if !report_path.exists() => (Value::Null, None),
                 Err(_) => (Value::Null, Some("Не удалось прочитать отчёт".into())),
             };
+            let recovery_path = path.join("recovery.json");
+            let (recovery, issue) = match read_json(&recovery_path) {
+                Ok(recovery) if recovery.is_object() => (recovery, issue),
+                Err(_) if !recovery_path.exists() => (Value::Null, issue),
+                _ => (
+                    Value::Null,
+                    Some("Не удалось прочитать отчёт повторного распознавания".into()),
+                ),
+            };
             Entry {
                 id,
                 has_result: regular_file(&path.join("result.json")),
                 has_audio: regular_file(&path.join("audio.wav")),
                 path,
                 report,
+                recovery,
                 issue,
             }
         })

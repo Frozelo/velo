@@ -2,6 +2,7 @@ mod api;
 mod audio;
 mod history;
 mod linux;
+mod recovery;
 mod sessions;
 mod ui;
 
@@ -244,7 +245,7 @@ fn main() -> Result<()> {
             }
         }
         _ => println!(
-            "Velo native integration spike\n  --doctor          input permissions\n  --capture-test 2  native microphone test, no API\n  --demo            capsule preview, no microphone or API\n  --hold            hold Right Cmd (existing keyd F24); release to transcribe and paste\n  --history         saved native dictations; view and copy, no API\n  --history-list    list session metadata in the terminal, no text or API\n\nPython version remains the default. Native spike: batch STT, no editor or settings UI yet."
+            "Velo native integration spike\n  --doctor          input permissions\n  --capture-test 2  native microphone test, no API\n  --demo            capsule preview, no microphone or API\n  --hold            hold Right Cmd (existing keyd F24); release to transcribe and paste\n  --history         saved native dictations; view, copy or retry via API\n  --history-list    list session metadata in the terminal, no text or API\n\nPython version remains the default. Native spike: batch STT, no editor or settings UI yet."
         ),
     }
     Ok(())
