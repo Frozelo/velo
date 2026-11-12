@@ -101,3 +101,5 @@ secret-tool store --label='Velo PlusVibe' application voice-dictation service pl
 ## Нативный Rust-прототип
 
 Начат поэтапный перенос: код и инструкция в [native/README.md](native/README.md). Это отдельный проверяемый вариант системной интеграции, а не полная замена Python. По умолчанию продолжает работать прежний сервис.
+
+История нативных диктовок: `native/target/release/velo-native --history`. Окно позволяет посмотреть и скопировать сохранённый текст без микрофона и API-запросов; историю Python пока не показывает.

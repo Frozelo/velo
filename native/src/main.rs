@@ -1,18 +1,17 @@
 mod api;
 mod audio;
+mod history;
 mod linux;
+mod sessions;
 mod ui;
 
 use anyhow::{Context, Result, bail};
+use sessions::{private_write, save_recording};
 use std::{
     env,
     fs::{self, OpenOptions},
-    io::Write,
-    os::unix::{
-        fs::{OpenOptionsExt, PermissionsExt},
-        io::AsRawFd,
-    },
-    path::{Path, PathBuf},
+    os::unix::{fs::OpenOptionsExt, io::AsRawFd},
+    path::PathBuf,
     process::Command,
     sync::{
         Arc,
@@ -20,7 +19,7 @@ use std::{
         mpsc,
     },
     thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 #[derive(Clone, Copy, PartialEq)]
@@ -36,32 +35,6 @@ pub enum Event {
     Start,
     Phase(Phase),
     Error(String),
-}
-
-fn private_write(path: &Path, bytes: &[u8]) -> Result<()> {
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .mode(0o600)
-        .open(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    Ok(())
-}
-
-fn save_recording(pcm: &[u8]) -> Result<PathBuf> {
-    let root = env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env::var_os("HOME").expect("HOME")).join(".local/state"))
-        .join("velo-native/sessions");
-    fs::create_dir_all(&root)?;
-    fs::set_permissions(&root, fs::Permissions::from_mode(0o700))?;
-    let id = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-    let session = root.join(id.to_string());
-    fs::create_dir(&session)?;
-    fs::set_permissions(&session, fs::Permissions::from_mode(0o700))?;
-    private_write(&session.join("audio.wav"), &audio::wav(pcm))?;
-    Ok(session)
 }
 
 fn held() -> Result<()> {
@@ -124,8 +97,9 @@ fn held() -> Result<()> {
                 let started = Instant::now();
                 let pcm = audio::capture(recording_stop.clone(), Duration::from_secs(120))?;
                 let captured = Instant::now();
-                let session = save_recording(&pcm)?;
-                saved_session = Some(session.clone());
+                let recording = save_recording(&pcm)?;
+                let session = recording.path.clone();
+                saved_session = Some(recording);
                 report["audio_seconds"] = serde_json::json!(pcm.len() as f64 / 32000.0);
                 report["capture_seconds"] = serde_json::json!(started.elapsed().as_secs_f64());
                 if cancelled.load(Ordering::Relaxed) {
@@ -159,7 +133,7 @@ fn held() -> Result<()> {
                 report["model"] = serde_json::json!(transcript.model);
                 report["stage"] = serde_json::json!("delivery");
                 let result = serde_json::json!({"text": transcript.text, "provider": transcript.provider, "model": transcript.model, "usage": transcript.usage});
-                private_write(&session.join("result.json"), &serde_json::to_vec(&result)?)?;
+                sessions::atomic_json(&session.join("result.json"), &result, true)?;
                 fs::remove_file(session.join("audio.wav"))?;
                 if !cancelled.load(Ordering::Relaxed) {
                     let delivery =
@@ -193,7 +167,7 @@ fn held() -> Result<()> {
             })();
             if let Some(session) = saved_session
                 && let Err(error) = private_write(
-                    &session.join("report.json"),
+                    &session.path.join("report.json"),
                     &serde_json::to_vec(&report).unwrap(),
                 )
             {
@@ -257,8 +231,20 @@ fn main() -> Result<()> {
             );
         }
         Some("--hold") => held()?,
+        Some("--history") => history::run()?,
+        Some("--history-list") => {
+            for entry in sessions::list(&sessions::root()?, sessions::HISTORY_LIMIT)? {
+                println!(
+                    "{}\t{}\ttext={}\taudio={}",
+                    entry.id,
+                    entry.outcome(),
+                    entry.has_result,
+                    entry.has_audio
+                );
+            }
+        }
         _ => println!(
-            "Velo native integration spike\n  --doctor          input permissions\n  --capture-test 2  native microphone test, no API\n  --demo            capsule preview, no microphone or API\n  --hold            hold Right Cmd (existing keyd F24); release to transcribe and paste\n\nPython version remains the default. Native spike: batch STT, no editor, no history UI yet."
+            "Velo native integration spike\n  --doctor          input permissions\n  --capture-test 2  native microphone test, no API\n  --demo            capsule preview, no microphone or API\n  --hold            hold Right Cmd (existing keyd F24); release to transcribe and paste\n  --history         saved native dictations; view and copy, no API\n  --history-list    list session metadata in the terminal, no text or API\n\nPython version remains the default. Native spike: batch STT, no editor or settings UI yet."
         ),
     }
     Ok(())

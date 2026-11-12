@@ -60,15 +60,7 @@ fn denied(target: Option<u64>, current: Option<u64>) -> Option<&'static str> {
     }
 }
 
-pub fn paste(text: &str, target: &Option<Value>, cancelled: &AtomicBool) -> Result<Delivery> {
-    let mut delivery = Delivery {
-        pasted: false,
-        reason: "cancelled",
-        checked_windows: Vec::new(),
-    };
-    if cancelled.load(Ordering::Relaxed) {
-        return Ok(delivery);
-    }
+pub fn copy_text(text: &str) -> Result<()> {
     let mut copy = Command::new("wl-copy")
         .arg("--")
         .stdin(Stdio::piped())
@@ -80,6 +72,19 @@ pub fn paste(text: &str, target: &Option<Value>, cancelled: &AtomicBool) -> Resu
     if !copy.wait()?.success() {
         bail!("Clipboard copy failed")
     }
+    Ok(())
+}
+
+pub fn paste(text: &str, target: &Option<Value>, cancelled: &AtomicBool) -> Result<Delivery> {
+    let mut delivery = Delivery {
+        pasted: false,
+        reason: "cancelled",
+        checked_windows: Vec::new(),
+    };
+    if cancelled.load(Ordering::Relaxed) {
+        return Ok(delivery);
+    }
+    copy_text(text)?;
     let window = focused_window();
     let target_id = window_id(target);
     delivery.checked_windows.push(window_id(&window));
