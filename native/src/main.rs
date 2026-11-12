@@ -2,6 +2,7 @@ mod api;
 mod audio;
 mod history;
 mod linux;
+mod polish;
 mod recovery;
 mod sessions;
 mod settings;
@@ -91,6 +92,8 @@ fn held() -> Result<()> {
             let mut saved_session = None;
             let mut report = serde_json::json!({"outcome":"failed", "stage":"capture"});
             let result: Result<()> = (|| {
+                // Freeze the route for this recording; settings changes apply
+                // to the next job without rebuilding the pooled HTTP client.
                 let config = settings::effective_config()?;
                 let provider = config.provider;
                 report["provider_mode"] = serde_json::json!(provider.as_str());
@@ -142,9 +145,16 @@ fn held() -> Result<()> {
                 let result = serde_json::json!({"text": transcript.text, "provider": transcript.provider, "model": transcript.model, "usage": transcript.usage});
                 sessions::atomic_json(&session.join("result.json"), &result, true)?;
                 fs::remove_file(session.join("audio.wav"))?;
+                if config.polish && !cancelled.load(Ordering::Relaxed) {
+                    report["stage"] = serde_json::json!("edit");
+                    if let Err(error) = polish::apply(&session, api, &cancelled) {
+                        eprintln!("Velo editor: {error}");
+                    }
+                }
+                let text = sessions::saved_text(&session)?;
+                report["stage"] = serde_json::json!("delivery");
                 if !cancelled.load(Ordering::Relaxed) {
-                    let delivery =
-                        linux::paste(result["text"].as_str().unwrap(), &target, &cancelled)?;
+                    let delivery = linux::paste(&text, &target, &cancelled)?;
                     report["delivery_reason"] = serde_json::json!(delivery.reason);
                     report["delivery_checked_window_ids"] =
                         serde_json::json!(delivery.checked_windows);
@@ -252,7 +262,7 @@ fn main() -> Result<()> {
             }
         }
         _ => println!(
-            "Velo native integration spike\n  --doctor          input permissions\n  --capture-test 2  native microphone test, no API\n  --demo            capsule preview, no microphone or API\n  --hold            hold Right Cmd (existing keyd F24); release to transcribe and paste\n  --history         saved native dictations; view, copy or retry via API\n  --history-list    list session metadata in the terminal, no text or API\n  --settings        choose native dictation provider, no API requests\n\nPython version remains the default. Native spike: batch STT, provider settings; no editor or microphone selection yet."
+            "Velo native integration spike\n  --doctor          input permissions\n  --capture-test 2  native microphone test, no API\n  --demo            capsule preview, no microphone or API\n  --hold            hold Right Cmd (existing keyd F24); release to transcribe and paste\n  --history         saved native dictations; view, copy or retry via API\n  --history-list    list session metadata in the terminal, no text or API\n  --settings        choose native dictation provider, no API requests\n\nPython version remains the default. Native spike: batch STT, optional text editing, provider settings; no microphone selection yet."
         ),
     }
     Ok(())

@@ -1,4 +1,4 @@
-use crate::{api, audio, sessions};
+use crate::{api, audio, polish, sessions, settings};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::{
@@ -18,12 +18,32 @@ pub enum Outcome {
 }
 
 pub fn run(session: &Path, cancel: &AtomicBool) -> Result<Outcome> {
-    run_with(session, cancel, |wav, cancel, attempts| {
-        let mut api = api::Api::new()?;
+    let mut context = None;
+    let outcome = run_with(session, cancel, |wav, cancel, attempts| {
+        let config = settings::effective_config()?;
+        let mut api = api::Api::with_provider(config.provider)?;
         let result = api.transcribe(wav, cancel);
-        *attempts = api.attempts;
+        *attempts = api.attempts.clone();
+        context = Some((config, api));
         result
-    })
+    })?;
+    if outcome == Outcome::Recovered
+        && let Some((config, mut api)) = context
+        && config.polish
+        && !cancel.load(Ordering::Relaxed)
+    {
+        // Live capture keeps this lock for the entire pipeline. Recovery's STT
+        // lock ended above, so reacquire it before publishing the edited text.
+        match sessions::lock(session) {
+            Ok(_lock) => {
+                if let Err(error) = polish::apply(session, &mut api, cancel) {
+                    eprintln!("Velo editor: {error}");
+                }
+            }
+            Err(error) => eprintln!("Velo editor: {error}"),
+        }
+    }
+    Ok(outcome)
 }
 
 fn read_audio(session: &Path) -> Result<Vec<u8>> {

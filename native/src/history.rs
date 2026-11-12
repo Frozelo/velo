@@ -60,6 +60,7 @@ struct View {
     path: gtk::Label,
     message: gtk::Label,
     copy: gtk::Button,
+    raw: gtk::CheckButton,
     retry: gtk::Button,
     cancel: gtk::Button,
     spinner: gtk::Spinner,
@@ -72,6 +73,7 @@ struct View {
 impl View {
     fn select(&self, index: Option<usize>) {
         self.copy.set_sensitive(false);
+        self.raw.set_visible(false);
         self.retry.set_sensitive(false);
         self.selected_text.replace(None);
         self.message.set_text("");
@@ -108,6 +110,10 @@ impl View {
                 details.push(format!("{label}: {value:.2} с"));
             }
         }
+        let edit_report = sessions::read_json(&entry.path.join("edit-report.json")).ok();
+        if let Some(seconds) = edit_report.as_ref().and_then(|r| r["seconds"].as_f64()) {
+            details.push(format!("Редактура: {seconds:.2} с"));
+        }
         self.details.set_text(&details.join(" · "));
         self.path.set_text(&entry.path.to_string_lossy());
         let mut notes = Vec::new();
@@ -115,7 +121,14 @@ impl View {
             notes.push(issue.clone());
         }
         if entry.has_result {
-            match entry.text() {
+            self.raw
+                .set_visible(entry.path.join("edited.json").exists());
+            let text = if self.raw.is_active() {
+                sessions::saved_raw_text(&entry.path)
+            } else {
+                entry.text()
+            };
+            match text {
                 Ok(text) => {
                     self.text.set_text(&text);
                     self.copy.set_sensitive(true);
@@ -144,6 +157,11 @@ impl View {
         });
         if let Some(error) = error {
             notes.push(error.to_owned());
+        }
+        if let Some(report) = edit_report
+            && report["outcome"].as_str() != Some("edited")
+        {
+            notes.push("Редактура не завершилась; доступен исходный текст.".into());
         }
         self.message.set_text(&notes.join("\n"));
     }
@@ -364,6 +382,8 @@ fn build(app: &gtk::Application, root: &std::path::Path) -> (gtk::ApplicationWin
         .has_frame(true)
         .child(&text_view)
         .build();
+    let raw = gtk::CheckButton::with_label("Показать исходный текст");
+    raw.set_visible(false);
     let message = gtk::Label::new(None);
     message.set_xalign(0.0);
     message.set_wrap(true);
@@ -403,6 +423,7 @@ fn build(app: &gtk::Application, root: &std::path::Path) -> (gtk::ApplicationWin
     footer.add_css_class("dim-label");
     content.append(&title);
     content.append(&details);
+    content.append(&raw);
     content.append(&text_scroll);
     content.append(&message);
     content.append(&actions);
@@ -428,6 +449,7 @@ fn build(app: &gtk::Application, root: &std::path::Path) -> (gtk::ApplicationWin
         path,
         message,
         copy: copy.clone(),
+        raw: raw.clone(),
         retry: retry.clone(),
         cancel: cancel.clone(),
         spinner,
@@ -439,6 +461,10 @@ fn build(app: &gtk::Application, root: &std::path::Path) -> (gtk::ApplicationWin
     let selected = view.clone();
     let selected_handler = list.connect_row_selected(move |_, row| {
         selected.select(row.map(|row| row.index() as usize));
+    });
+    let selected = view.clone();
+    let raw_handler = raw.connect_toggled(move |_| {
+        selected.select(selected.list.selected_row().map(|row| row.index() as usize));
     });
     let copied = view.clone();
     let copy_handler = copy.connect_clicked(move |_| {
@@ -487,14 +513,16 @@ fn build(app: &gtk::Application, root: &std::path::Path) -> (gtk::ApplicationWin
         refresh_handler,
         retry_handler,
         cancel_handler,
+        raw_handler,
     )));
     window.connect_destroy(move |_| {
-        if let Some((selected, copied, refreshed, retried, cancelled)) = handlers.take() {
+        if let Some((selected, copied, refreshed, retried, cancelled, original)) = handlers.take() {
             list.disconnect(selected);
             copy.disconnect(copied);
             refresh.disconnect(refreshed);
             retry.disconnect(retried);
             cancel.disconnect(cancelled);
+            raw.disconnect(original);
         }
     });
     window.present();
@@ -557,6 +585,7 @@ mod tests {
             .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
             .build();
         app.register(None::<&gtk::gio::Cancellable>).unwrap();
+        settings_ui::exercise_form(&app);
         let root = Fixture(std::env::temp_dir().join(format!(
                 "velo-history-worker-{}-{}",
                 std::process::id(),
@@ -605,6 +634,23 @@ mod tests {
             view.selected_text.borrow().as_deref(),
             Some("Текст восстановлен.")
         );
+        sessions::atomic_json(
+            &root.0.join("3/edited.json"),
+            &serde_json::json!({"text":"Текст после редактуры."}),
+            true,
+        )
+        .unwrap();
+        view.refresh(&root.0);
+        assert_eq!(
+            view.selected_text.borrow().as_deref(),
+            Some("Текст после редактуры.")
+        );
+        view.raw.set_active(true);
+        assert_eq!(
+            view.selected_text.borrow().as_deref(),
+            Some("Текст восстановлен.")
+        );
+        view.raw.set_active(false);
 
         view.list.select_row(view.list.row_at_index(1).as_ref());
         view.recover_with(&window, &root.0, |path, cancel| {

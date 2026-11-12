@@ -27,7 +27,7 @@ fi
 restore=()
 provider_args=()
 unset_variables=()
-for variable in VELO_PROVIDER; do
+for variable in VELO_PROVIDER VELO_POLISH; do
     if [[ -v "$variable" ]]; then
         provider_args+=(--setenv="$variable=${!variable}")
     else

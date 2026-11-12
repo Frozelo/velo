@@ -123,6 +123,17 @@ fn read_json_file(file: File) -> Result<Value> {
 }
 
 pub fn saved_text(session: &Path) -> Result<String> {
+    if let Ok(value) = read_json(&session.join("edited.json"))
+        && let Some(text) = value["text"]
+            .as_str()
+            .filter(|text| !text.trim().is_empty())
+    {
+        return Ok(text.to_owned());
+    }
+    saved_raw_text(session)
+}
+
+pub fn saved_raw_text(session: &Path) -> Result<String> {
     let result =
         read_json(&session.join("result.json")).context("Could not read saved transcription")?;
     let text = result["text"]
