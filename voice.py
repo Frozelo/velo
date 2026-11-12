@@ -19,6 +19,25 @@ MODEL = os.environ.get('VOICE_MODEL', 'openai/whisper-large-v3-turbo')
 def notify(message):
     subprocess.run(['notify-send', 'Диктовка', message], check=False)
 
+def focused_window():
+    try:
+        return json.loads(subprocess.check_output(['niri', 'msg', '-j', 'focused-window'], text=True, stderr=subprocess.DEVNULL))
+    except (OSError, subprocess.CalledProcessError, ValueError):
+        return None
+
+def paste(window):
+    from evdev import UInput, ecodes as e
+    terminal = (window.get('app_id') or '').lower() in ('kitty', 'alacritty', 'org.gnome.terminal', 'com.mitchellh.ghostty')
+    keys = [e.KEY_LEFTCTRL] + ([e.KEY_LEFTSHIFT] if terminal else []) + [e.KEY_V]
+    with UInput({e.EV_KEY: keys}, name='Velo paste') as device:
+        time.sleep(0.15)
+        for code in keys:
+            device.write(e.EV_KEY, code, 1)
+            device.syn()
+        for code in reversed(keys):
+            device.write(e.EV_KEY, code, 0)
+            device.syn()
+
 def key():
     value = os.environ.get('OPENROUTER_API_KEY')
     if value:
@@ -44,6 +63,14 @@ def transcribe(audio, api_key):
         return json.load(response)['text'].strip()
 
 def record():
+    recorder = None
+    stopping = False
+    def stop(signum, frame):
+        nonlocal stopping
+        stopping = True
+        if recorder and recorder.poll() is None:
+            recorder.send_signal(signal.SIGINT)
+    signal.signal(signal.SIGTERM, stop)
     api_key = key()
     if not api_key:
         notify('Нет ключа OpenRouter. См. README.')
@@ -58,14 +85,7 @@ def record():
         return 1
     with os.fdopen(fd, 'w') as f:
         f.write(str(os.getpid()))
-    recorder = None
-    stopping = False
-    def stop(signum, frame):
-        nonlocal stopping
-        stopping = True
-        if recorder and recorder.poll() is None:
-            recorder.send_signal(signal.SIGINT)
-    signal.signal(signal.SIGTERM, stop)
+    window = focused_window()
     try:
         with tempfile.TemporaryDirectory(prefix='voice-', dir=STATE) as tmp:
             audio = Path(tmp) / 'audio.wav'
@@ -82,7 +102,15 @@ def record():
             if not text:
                 raise RuntimeError('Сервис вернул пустой текст.')
             subprocess.run(['wl-copy', '--', text], check=True)
-            notify(f'Текст скопирован в буфер ({time.monotonic() - started:.1f} с).')
+            current = focused_window()
+            if window and current and window.get('id') == current.get('id'):
+                try:
+                    paste(current)
+                    notify(f'Команда вставки отправлена ({time.monotonic() - started:.1f} с).')
+                except (OSError, ImportError):
+                    notify('Не удалось вставить текст; он в буфере обмена.')
+            else:
+                notify('Фокус изменился: текст сохранён в буфер обмена.')
             print('Транскрибация завершена.')
     except (OSError, RuntimeError, ValueError, KeyError, urllib.error.URLError, subprocess.CalledProcessError) as exc:
         print(f'Ошибка: {exc}', file=sys.stderr)
