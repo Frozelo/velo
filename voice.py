@@ -13,6 +13,7 @@ import urllib.error
 import urllib.request
 import uuid
 import wave
+import providers
 
 STATE = Path(os.environ.get('XDG_RUNTIME_DIR', '/tmp')) / f'voice-dictation-{os.getuid()}'
 MODEL = os.environ.get('VOICE_MODEL', 'openai/whisper-large-v3-turbo')
@@ -40,30 +41,27 @@ def paste(window):
             device.syn()
 
 def key():
-    value = os.environ.get('OPENROUTER_API_KEY')
-    if value:
-        return value
-    try:
-        return subprocess.check_output(['secret-tool', 'lookup', 'application', 'voice-dictation', 'service', 'openrouter'], stderr=subprocess.DEVNULL, text=True).strip()
-    except (OSError, subprocess.CalledProcessError):
-        return ''
+    # A non-empty sentinel allows the normal pipeline when only PlusVibe is set.
+    # providers.request never sends this sentinel to a server.
+    return providers.key('openrouter') or ('plusvibe-only' if providers.key('plusvibe') else '')
 
 def transcribe(audio, api_key, language=None, return_usage=False):
-    boundary = '----voice-' + uuid.uuid4().hex
-    chunks = []
-    def field(name, data, filename=None):
-        disposition = f'Content-Disposition: form-data; name="{name}"'
-        if filename:
-            disposition += f'; filename="{filename}"\r\nContent-Type: audio/wav'
-        chunks.append(f'--{boundary}\r\n{disposition}\r\n\r\n'.encode() + data + b'\r\n')
-    field('model', MODEL.encode())
-    if language:
-        field('language', language.encode())
-    field('file', audio.read_bytes(), 'recording.wav')
-    chunks.append(f'--{boundary}--\r\n'.encode())
-    request = urllib.request.Request('https://openrouter.ai/api/v1/audio/transcriptions', data=b''.join(chunks), headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'multipart/form-data; boundary=' + boundary})
-    with urllib.request.urlopen(request, timeout=90) as response:
-        result = json.load(response)
+    def build(provider):
+        model = MODEL if provider == 'openrouter' else os.environ.get('VELO_PLUSVIBE_STT_MODEL', 'whisper-large-v3-turbo')
+        boundary = '----voice-' + uuid.uuid4().hex
+        chunks = []
+        def field(name, data, filename=None):
+            disposition = f'Content-Disposition: form-data; name="{name}"'
+            if filename:
+                disposition += f'; filename="{filename}"\r\nContent-Type: audio/wav'
+            chunks.append(f'--{boundary}\r\n{disposition}\r\n\r\n'.encode() + data + b'\r\n')
+        field('model', model.encode())
+        if language:
+            field('language', language.encode())
+        field('file', audio.read_bytes(), 'recording.wav')
+        chunks.append(f'--{boundary}--\r\n'.encode())
+        return b''.join(chunks), 'multipart/form-data; boundary=' + boundary, model
+    result = providers.request('/audio/transcriptions', build, api_key)
     text = result['text'].strip()
     return (text, result.get('usage', {})) if return_usage else text
 

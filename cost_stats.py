@@ -17,7 +17,7 @@ def save(chunks, editor, edit_status, session_id=None, uncertain=False):
     amounts = [cost(item) for item in chunks]
     edit = cost(editor) if edit_status == 'ok' else (0.0 if edit_status == 'disabled' else None)
     speech = sum(x for x in amounts if x is not None)
-    complete = all(x is not None for x in amounts) and edit is not None and not uncertain
+    complete = all(x is not None for x in amounts) and edit is not None and not uncertain and not any(item.get('prior_attempt_cost_unknown') for item in chunks) and not (editor or {}).get('prior_attempt_cost_unknown')
     row = {'time': datetime.now(timezone.utc).isoformat(), 'chunks': len(chunks),
            'speech_usd': speech, 'edit_usd': edit, 'known_usd': speech + (edit or 0),
            'complete': complete, 'edit_status': edit_status, 'session_id': session_id}

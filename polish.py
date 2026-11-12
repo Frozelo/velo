@@ -8,6 +8,7 @@ import time
 import urllib.error
 import urllib.request
 import voice
+import providers
 
 MODEL = os.environ.get('VELO_EDITOR_MODEL', 'google/gemini-3.1-flash-lite')
 INSTRUCTION = ('Ты редактор распознанной устной речи. Расставь знаки препинания и исправь очевидные '
@@ -16,14 +17,13 @@ INSTRUCTION = ('Ты редактор распознанной устной ре
                'из текста. Не добавляй факты, пояснения и заголовки. Верни только исправленный текст.')
 
 def polish(text, api_key):
-    payload = {'model': MODEL, 'messages': [{'role': 'system', 'content': INSTRUCTION},
-               {'role': 'user', 'content': text}], 'temperature': 0.1}
-    req = urllib.request.Request('https://openrouter.ai/api/v1/chat/completions',
-        data=json.dumps(payload, ensure_ascii=False).encode(),
-        headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'})
+    def build(provider):
+        model = MODEL if provider == 'openrouter' else os.environ.get('VELO_PLUSVIBE_EDITOR_MODEL', 'gemini-3.1-flash-lite')
+        payload = {'model': model, 'messages': [{'role': 'system', 'content': INSTRUCTION},
+                   {'role': 'user', 'content': text}], 'temperature': 0.1}
+        return json.dumps(payload, ensure_ascii=False).encode(), 'application/json', model
     start = time.monotonic()
-    with urllib.request.urlopen(req, timeout=45) as response:
-        data = json.load(response)
+    data = providers.request('/chat/completions', build, api_key)
     result = data['choices'][0]['message']['content']
     if not isinstance(result, str) or not result.strip():
         raise ValueError('Модель вернула пустой ответ')
