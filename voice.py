@@ -48,7 +48,7 @@ def key():
     except (OSError, subprocess.CalledProcessError):
         return ''
 
-def transcribe(audio, api_key):
+def transcribe(audio, api_key, language=None):
     boundary = '----voice-' + uuid.uuid4().hex
     chunks = []
     def field(name, data, filename=None):
@@ -57,6 +57,8 @@ def transcribe(audio, api_key):
             disposition += f'; filename="{filename}"\r\nContent-Type: audio/wav'
         chunks.append(f'--{boundary}\r\n{disposition}\r\n\r\n'.encode() + data + b'\r\n')
     field('model', MODEL.encode())
+    if language:
+        field('language', language.encode())
     field('file', audio.read_bytes(), 'recording.wav')
     chunks.append(f'--{boundary}--\r\n'.encode())
     request = urllib.request.Request('https://openrouter.ai/api/v1/audio/transcriptions', data=b''.join(chunks), headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'multipart/form-data; boundary=' + boundary})
