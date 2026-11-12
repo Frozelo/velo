@@ -48,7 +48,7 @@ def key():
     except (OSError, subprocess.CalledProcessError):
         return ''
 
-def transcribe(audio, api_key, language=None):
+def transcribe(audio, api_key, language=None, return_usage=False):
     boundary = '----voice-' + uuid.uuid4().hex
     chunks = []
     def field(name, data, filename=None):
@@ -63,7 +63,9 @@ def transcribe(audio, api_key, language=None):
     chunks.append(f'--{boundary}--\r\n'.encode())
     request = urllib.request.Request('https://openrouter.ai/api/v1/audio/transcriptions', data=b''.join(chunks), headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'multipart/form-data; boundary=' + boundary})
     with urllib.request.urlopen(request, timeout=90) as response:
-        return json.load(response)['text'].strip()
+        result = json.load(response)
+    text = result['text'].strip()
+    return (text, result.get('usage', {})) if return_usage else text
 
 def record():
     recorder = None

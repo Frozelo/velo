@@ -12,6 +12,8 @@ import tempfile
 import time
 import wave
 import voice
+import polish
+import cost_stats
 
 RATE = 16000
 CHUNK_BYTES = RATE * 2 * 5
@@ -28,7 +30,7 @@ def wav_bytes(pcm):
 def send_chunk(pcm, api_key, directory, number):
     path = Path(directory) / f'{number}.wav'
     path.write_bytes(wav_bytes(pcm))
-    return voice.transcribe(path, api_key, language='ru')
+    return voice.transcribe(path, api_key, language='ru', return_usage=True)
 
 def main():
     insert = '--insert' in sys.argv[1:]
@@ -96,11 +98,27 @@ def run(insert):
             if not futures:
                 raise RuntimeError('Запись слишком короткая.')
             # Never insert an incomplete transcript when a request fails.
-            parts = [future.result() for future in futures]
+            results = [future.result() for future in futures]
+            parts = [result[0] for result in results]
             text = ' '.join(part.strip() for part in parts if part.strip())
             if not text:
                 raise RuntimeError('Сервис вернул пустой текст.')
             elapsed = time.monotonic() - stopped_at
+            edit_seconds = None
+            edit_status = 'disabled'
+            edit_usage = None
+            if insert and os.environ.get('VELO_POLISH', '1') != '0':
+                try:
+                    text, edit_seconds, edit_usage = polish.polish(text, api_key)
+                    edit_status = 'ok'
+                except (OSError, ValueError, KeyError, IndexError) as exc:
+                    print(f'Редактура недоступна: {exc}', file=sys.stderr)
+                    edit_status = 'failed'
+            if insert:
+                try:
+                    cost_stats.save([result[1] for result in results], edit_usage, edit_status)
+                except OSError as exc:
+                    print(f'Не удалось сохранить статистику: {exc}', file=sys.stderr)
             if insert:
                 subprocess.run(['wl-copy', '--', text], check=True)
                 current = voice.focused_window()
@@ -116,7 +134,9 @@ def run(insert):
                 print(f'Готово за {elapsed:.2f} с после остановки; частей: {len(futures)}.\n{text}', flush=True)
                 print('Текст только показан в терминале, в активное окно не вставлен.')
             with (voice.STATE / 'chunked-timings.jsonl').open('a', encoding='utf-8') as f:
-                f.write(json.dumps({'chunks': len(futures), 'stop_to_text_seconds': round(elapsed, 3)}) + '\n')
+                f.write(json.dumps({'chunks': len(futures), 'stop_to_text_seconds': round(elapsed, 3),
+                    'edit_seconds': round(edit_seconds, 3) if edit_seconds is not None else None,
+                    'edit_status': edit_status, 'stop_to_delivery_seconds': round(time.monotonic() - stopped_at, 3)}) + '\n')
     except Exception as exc:
         print(f'Ошибка: {exc}', file=sys.stderr)
         if insert:
