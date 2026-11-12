@@ -4,6 +4,8 @@ mod history;
 mod linux;
 mod recovery;
 mod sessions;
+mod settings;
+mod settings_ui;
 mod ui;
 
 use anyhow::{Context, Result, bail};
@@ -89,6 +91,9 @@ fn held() -> Result<()> {
             let mut saved_session = None;
             let mut report = serde_json::json!({"outcome":"failed", "stage":"capture"});
             let result: Result<()> = (|| {
+                let config = settings::effective_config()?;
+                let provider = config.provider;
+                report["provider_mode"] = serde_json::json!(provider.as_str());
                 let target = linux::focused_window();
                 report["target_window_id"] = target
                     .as_ref()
@@ -110,10 +115,11 @@ fn held() -> Result<()> {
                 let _ = worker_events.send(Event::Phase(Phase::Processing));
                 report["stage"] = serde_json::json!("api");
                 if client.is_none() {
-                    client = Some(api::Api::new()?);
+                    client = Some(api::Api::with_provider(provider)?);
                 }
                 let api_started = Instant::now();
                 let api = client.as_mut().unwrap();
+                api.set_provider(provider);
                 let response = api.transcribe(&audio::wav(&pcm), &cancelled);
                 report["api_attempts"] = serde_json::json!(api.attempts);
                 report["api_seconds"] = serde_json::json!(api_started.elapsed().as_secs_f64());
@@ -233,6 +239,7 @@ fn main() -> Result<()> {
         }
         Some("--hold") => held()?,
         Some("--history") => history::run()?,
+        Some("--settings") => settings_ui::run()?,
         Some("--history-list") => {
             for entry in sessions::list(&sessions::root()?, sessions::HISTORY_LIMIT)? {
                 println!(
@@ -245,7 +252,7 @@ fn main() -> Result<()> {
             }
         }
         _ => println!(
-            "Velo native integration spike\n  --doctor          input permissions\n  --capture-test 2  native microphone test, no API\n  --demo            capsule preview, no microphone or API\n  --hold            hold Right Cmd (existing keyd F24); release to transcribe and paste\n  --history         saved native dictations; view, copy or retry via API\n  --history-list    list session metadata in the terminal, no text or API\n\nPython version remains the default. Native spike: batch STT, no editor or settings UI yet."
+            "Velo native integration spike\n  --doctor          input permissions\n  --capture-test 2  native microphone test, no API\n  --demo            capsule preview, no microphone or API\n  --hold            hold Right Cmd (existing keyd F24); release to transcribe and paste\n  --history         saved native dictations; view, copy or retry via API\n  --history-list    list session metadata in the terminal, no text or API\n  --settings        choose native dictation provider, no API requests\n\nPython version remains the default. Native spike: batch STT, provider settings; no editor or microphone selection yet."
         ),
     }
     Ok(())

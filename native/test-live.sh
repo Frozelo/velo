@@ -25,13 +25,25 @@ if systemctl --user is-active --quiet "$unit"; then
     exit 0
 fi
 restore=()
+provider_args=()
+unset_variables=()
+for variable in VELO_PROVIDER; do
+    if [[ -v "$variable" ]]; then
+        provider_args+=(--setenv="$variable=${!variable}")
+    else
+        unset_variables+=("$variable")
+    fi
+done
+if (( ${#unset_variables[@]} )); then
+    provider_args+=(--property="UnsetEnvironment=${unset_variables[*]}")
+fi
 if systemctl --user is-active --quiet velo-hold.service; then
     restore=(--property='ExecStopPost=/usr/bin/systemctl --user start velo-hold.service')
     systemctl --user stop velo-hold.service
 fi
 if ! systemd-run --user --collect --unit="$unit" "${restore[@]}" \
     --property=TimeoutStopSec=5s --property=RuntimeMaxSec=15min \
-    --setenv="VELO_PROVIDER=${VELO_PROVIDER:-plusvibe}" "$binary" --hold; then
+    "${provider_args[@]}" "$binary" --hold; then
     if (( ${#restore[@]} )); then systemctl --user start velo-hold.service; fi
     exit 1
 fi

@@ -1,3 +1,4 @@
+use crate::settings::{self, Provider};
 use anyhow::{Result, bail};
 use reqwest::blocking::{Client, multipart};
 use serde_json::{Value, json};
@@ -16,7 +17,7 @@ pub struct Api {
     client: Client,
     keys: [String; 2],
     bases: [String; 2],
-    mode: String,
+    mode: Provider,
     primary_retry: Option<Instant>,
     pub attempts: Vec<Value>,
 }
@@ -85,10 +86,10 @@ fn network_kind(error: &reqwest::Error) -> &'static str {
 
 impl Api {
     pub fn new() -> Result<Self> {
-        let mode = env::var("VELO_PROVIDER").unwrap_or_else(|_| "auto".into());
-        if !["auto", "openrouter", "plusvibe"].contains(&mode.as_str()) {
-            bail!("Invalid VELO_PROVIDER")
-        }
+        Self::with_provider(settings::effective_config()?.provider)
+    }
+
+    pub fn with_provider(mode: Provider) -> Result<Self> {
         let keys = [
             key("openrouter", "OPENROUTER_API_KEY"),
             key("plusvibe", "PLUSVIBE_API_KEY"),
@@ -114,6 +115,13 @@ impl Api {
         })
     }
 
+    pub fn set_provider(&mut self, mode: Provider) {
+        if self.mode != mode {
+            self.mode = mode;
+            self.primary_retry = None;
+        }
+    }
+
     pub fn transcribe(&mut self, wav: &[u8], cancel: &AtomicBool) -> Result<Transcript> {
         self.attempts.clear();
         let started = Instant::now();
@@ -123,8 +131,9 @@ impl Api {
         for index in 0..2 {
             if self.keys[index].is_empty()
                 || (index == 0
-                    && (self.mode == "plusvibe" || (self.mode == "auto" && skip_primary)))
-                || (index == 1 && self.mode == "openrouter")
+                    && (self.mode == Provider::PlusVibe
+                        || (self.mode == Provider::Auto && skip_primary)))
+                || (index == 1 && self.mode == Provider::OpenRouter)
             {
                 continue;
             }
@@ -141,7 +150,8 @@ impl Api {
                         .unwrap_or_else(|_| "whisper-large-v3-turbo".into()),
                 )
             };
-            let can_fallback = index == 0 && self.mode == "auto" && !self.keys[1].is_empty();
+            let can_fallback =
+                index == 0 && self.mode == Provider::Auto && !self.keys[1].is_empty();
             for attempt in 1..=MAX_ATTEMPTS {
                 check_cancel(cancel)?;
                 let remaining = BUDGET.saturating_sub(started.elapsed());
@@ -284,7 +294,7 @@ mod tests {
         let base = format!("http://{}", listener.local_addr().unwrap());
         let server = thread::spawn(move || {
             let mut requests = Vec::new();
-            for code in [403, 200, 200] {
+            for code in [403, 200, 200, 200] {
                 let (mut socket, _) = listener.accept().unwrap();
                 socket
                     .set_read_timeout(Some(Duration::from_secs(3)))
@@ -334,7 +344,7 @@ mod tests {
                 .unwrap(),
             keys: ["primary-test-key".into(), "backup-test-key".into()],
             bases: [format!("{base}/primary"), format!("{base}/backup")],
-            mode: "auto".into(),
+            mode: crate::settings::Provider::Auto,
             primary_retry: None,
             attempts: Vec::new(),
         };
@@ -350,12 +360,21 @@ mod tests {
         assert_eq!(second.provider, "plusvibe");
         assert!(second.usage.get("cost").is_none());
         assert!(second.usage.get("provider_reported_cost").is_some());
+        api.set_provider(crate::settings::Provider::OpenRouter);
+        assert!(api.primary_retry.is_none());
+        assert_eq!(
+            api.transcribe(b"wav", &std::sync::atomic::AtomicBool::new(false))
+                .unwrap()
+                .provider,
+            "openrouter"
+        );
         let requests = server.join().unwrap();
         assert!(requests[0].0.contains("/primary/audio/transcriptions"));
         assert!(requests[0].1.contains("primary-test-key"));
         assert!(requests[1].0.contains("/backup/audio/transcriptions"));
         assert!(requests[1].1.contains("backup-test-key"));
         assert!(requests[2].0.contains("/backup/audio/transcriptions"));
+        assert!(requests[3].0.contains("/primary/audio/transcriptions"));
     }
 
     fn local_api(
@@ -438,7 +457,7 @@ mod tests {
                 .unwrap(),
             keys: [String::new(), "dummy-key".into()],
             bases: [base.clone(), base],
-            mode: "plusvibe".into(),
+            mode: crate::settings::Provider::PlusVibe,
             primary_retry: None,
             attempts: Vec::new(),
         };

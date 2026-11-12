@@ -1,4 +1,4 @@
-use crate::{linux, recovery, sessions};
+use crate::{linux, recovery, sessions, settings_ui};
 use anyhow::Result;
 use gtk::{glib, prelude::*};
 use std::{
@@ -310,6 +310,18 @@ fn build(app: &gtk::Application, root: &std::path::Path) -> (gtk::ApplicationWin
     let refresh = gtk::Button::from_icon_name("view-refresh-symbolic");
     refresh.set_tooltip_text(Some("Обновить историю"));
     header.pack_end(&refresh);
+    let preferences = gtk::Button::from_icon_name("preferences-system-symbolic");
+    preferences.set_tooltip_text(Some("Настройки Velo"));
+    header.pack_start(&preferences);
+    let settings_window = window.downgrade();
+    preferences.connect_clicked(move |_| {
+        if let Some(window) = settings_window.upgrade()
+            && let Some(app) = window.application()
+            && let Err(error) = settings_ui::present(&app, Some(&window))
+        {
+            eprintln!("Velo settings: {error}");
+        }
+    });
     window.set_titlebar(Some(&header));
 
     let list = gtk::ListBox::new();
