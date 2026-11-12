@@ -100,6 +100,28 @@ class RecoveryTests(unittest.TestCase):
         with patch.object(voice, 'transcribe', return_value=('Восстановлено', {})):
             self.assertEqual(recover.resume(saved, 'dummy'), 'Восстановлено')
 
+    def test_cancel_preserves_audio_without_api_request(self):
+        read_fd, write_fd = os.pipe()
+        os.write(write_fd, bytes(1000))
+        os.close(write_fd)
+        handlers = {}
+        class Process:
+            stdout = os.fdopen(read_fd, 'rb')
+            def poll(self):
+                return 0
+            def wait(self):
+                handlers[signal.SIGUSR1](signal.SIGUSR1, None)
+            def send_signal(self, value):
+                pass
+        process = Process()
+        with patch.object(voice, 'STATE', Path(self.tmp.name) / 'runtime'), patch.object(chunked.signal, 'signal', side_effect=lambda sig, fn: handlers.update({sig: fn})), patch.object(voice, 'key', return_value='dummy'), patch.object(voice, 'focused_window', return_value=None), patch.object(chunked.subprocess, 'Popen', return_value=process), patch.object(voice, 'transcribe') as api:
+            self.assertEqual(chunked.run(False), 1)
+            api.assert_not_called()
+        process.stdout.close()
+        saved = [p.parent for p in sessions.ROOT.glob('*/session.json') if p.parent != self.path][0]
+        self.assertEqual(json.loads((saved / 'session.json').read_text())['status'], 'cancelled')
+        self.assertEqual((saved / 'audio.pcm').stat().st_size, 1000)
+
     def test_permissions(self):
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o700)
         self.assertEqual((self.path / 'session.json').stat().st_mode & 0o777, 0o600)

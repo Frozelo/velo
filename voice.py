@@ -18,7 +18,7 @@ STATE = Path(os.environ.get('XDG_RUNTIME_DIR', '/tmp')) / f'voice-dictation-{os.
 MODEL = os.environ.get('VOICE_MODEL', 'openai/whisper-large-v3-turbo')
 
 def notify(message):
-    subprocess.run(['notify-send', 'Диктовка', message], check=False)
+    print(f'Velo: {message}', file=sys.stderr, flush=True)
 
 def focused_window():
     try:
