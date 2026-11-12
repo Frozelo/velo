@@ -8,12 +8,13 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
-import tempfile
+import contextlib
 import time
 import wave
 import voice
 import polish
 import cost_stats
+import sessions
 
 RATE = 16000
 CHUNK_BYTES = RATE * 2 * 5
@@ -28,27 +29,22 @@ def wav_bytes(pcm):
     return output.getvalue()
 
 def send_chunk(pcm, api_key, directory, number):
-    path = Path(directory) / f'{number}.wav'
-    path.write_bytes(wav_bytes(pcm))
-    return voice.transcribe(path, api_key, language='ru', return_usage=True)
+    return sessions.transcribe(Path(directory), pcm, number, api_key)
 
 def main():
     insert = '--insert' in sys.argv[1:]
     if insert:
+        voice.STATE.mkdir(mode=0o700, parents=True, exist_ok=True)
         try:
-            fd = os.open(voice.STATE / 'recording.pid', os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileNotFoundError:
-            voice.STATE.mkdir(mode=0o700, parents=True, exist_ok=True)
-            fd = os.open(voice.STATE / 'recording.pid', os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError:
+            with sessions.lock(voice.STATE):
+                (voice.STATE / 'recording.pid').write_text(str(os.getpid()))
+                try:
+                    return run(insert)
+                finally:
+                    (voice.STATE / 'recording.pid').unlink(missing_ok=True)
+        except RuntimeError:
             voice.notify('Предыдущая диктовка ещё обрабатывается.')
             return 1
-        with os.fdopen(fd, 'w') as f:
-            f.write(str(os.getpid()))
-        try:
-            return run(insert)
-        finally:
-            (voice.STATE / 'recording.pid').unlink(missing_ok=True)
     return run(insert)
 
 def run(insert):
@@ -62,6 +58,8 @@ def run(insert):
                 process.send_signal(signal.SIGINT)
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
+    os.umask(0o077)
+    sessions.cleanup()
     api_key = voice.key()
     if not api_key:
         if insert:
@@ -70,6 +68,7 @@ def run(insert):
     voice.STATE.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(voice.STATE, 0o700)
     window = voice.focused_window()
+    session = sessions.create()
     process = subprocess.Popen(['pw-record', '--raw', '--rate', str(RATE), '--channels', '1', '--format', 's16', '-'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     if stopped_at is not None:
         process.send_signal(signal.SIGINT)
@@ -80,17 +79,25 @@ def run(insert):
     buffer = bytearray()
     futures = []
     try:
-        with tempfile.TemporaryDirectory(prefix='chunked-', dir=voice.STATE) as tmp, concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(sessions.lock(session))
+            journal = stack.enter_context((session / 'audio.pcm').open('ab', buffering=0))
+            pool = stack.enter_context(concurrent.futures.ThreadPoolExecutor(max_workers=3))
+            tmp = str(session)
             while True:
                 data = os.read(process.stdout.fileno(), 8192)
                 if not data:
                     break
+                journal.write(data)
                 buffer.extend(data)
                 while len(buffer) >= CHUNK_BYTES:
+                    os.fsync(journal.fileno())
                     pcm = bytes(buffer[:CHUNK_BYTES])
                     del buffer[:CHUNK_BYTES]
                     futures.append(pool.submit(send_chunk, pcm, api_key, tmp, len(futures)))
             process.wait()
+            os.fsync(journal.fileno())
+            sessions.status(session, 'processing')
             if stopped_at is None:
                 raise RuntimeError('Запись прервалась до остановки.')
             if len(buffer) >= 2:
@@ -103,20 +110,24 @@ def run(insert):
             text = ' '.join(part.strip() for part in parts if part.strip())
             if not text:
                 raise RuntimeError('Сервис вернул пустой текст.')
+            sessions.save_text(session, text)
             elapsed = time.monotonic() - stopped_at
             edit_seconds = None
             edit_status = 'disabled'
             edit_usage = None
             if insert and os.environ.get('VELO_POLISH', '1') != '0':
                 try:
-                    text, edit_seconds, edit_usage = polish.polish(text, api_key)
+                    text, edit_seconds, edit_usage = sessions.retry(lambda: polish.polish(text, api_key), session / 'attempts-edit.jsonl')
+                    sessions.save_text(session, text, 'edited.json')
+                    sessions.write(session / 'edit-usage.json', edit_usage)
                     edit_status = 'ok'
                 except (OSError, ValueError, KeyError, IndexError) as exc:
                     print(f'Редактура недоступна: {exc}', file=sys.stderr)
                     edit_status = 'failed'
+            sessions.finish(session)
             if insert:
                 try:
-                    cost_stats.save([result[1] for result in results], edit_usage, edit_status)
+                    sessions.account(session, edit_status)
                 except OSError as exc:
                     print(f'Не удалось сохранить статистику: {exc}', file=sys.stderr)
             if insert:
@@ -138,9 +149,14 @@ def run(insert):
                     'edit_seconds': round(edit_seconds, 3) if edit_seconds is not None else None,
                     'edit_status': edit_status, 'stop_to_delivery_seconds': round(time.monotonic() - stopped_at, 3)}) + '\n')
     except Exception as exc:
+        sessions.status(session, 'failed')
+        try:
+            sessions.account(session, 'failed')
+        except OSError:
+            pass
         print(f'Ошибка: {exc}', file=sys.stderr)
         if insert:
-            voice.notify('Ошибка записи или распознавания. Текст не вставлен.')
+            voice.notify(f'Запись сохранена для восстановления: {session.name}')
         return 1
     finally:
         if process.poll() is None:

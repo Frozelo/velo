@@ -13,14 +13,14 @@ def cost(usage):
     value = usage.get('cost') if isinstance(usage, dict) else None
     return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0 else None
 
-def save(chunks, editor, edit_status):
+def save(chunks, editor, edit_status, session_id=None, uncertain=False):
     amounts = [cost(item) for item in chunks]
     edit = cost(editor) if edit_status == 'ok' else (0.0 if edit_status == 'disabled' else None)
     speech = sum(x for x in amounts if x is not None)
-    complete = all(x is not None for x in amounts) and edit is not None
+    complete = all(x is not None for x in amounts) and edit is not None and not uncertain
     row = {'time': datetime.now(timezone.utc).isoformat(), 'chunks': len(chunks),
            'speech_usd': speech, 'edit_usd': edit, 'known_usd': speech + (edit or 0),
-           'complete': complete, 'edit_status': edit_status}
+           'complete': complete, 'edit_status': edit_status, 'session_id': session_id}
     DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd = os.open(FILE, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
     with os.fdopen(fd, 'a', encoding='utf-8') as f:
@@ -46,6 +46,10 @@ def main():
     if not rows:
         print('Пока нет статистики.')
         return
+    unique = {}
+    for index, row in enumerate(rows):
+        unique[row.get('session_id') or str(index)] = row
+    rows = list(unique.values())
     last = rows[-1]
     full = [r for r in rows if r.get('complete')]
     print(f"Последняя диктовка: ${last['known_usd']:.8f}" + ('' if last['complete'] else ' (неполные данные)'))
