@@ -12,6 +12,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+import wave
 
 STATE = Path(os.environ.get('XDG_RUNTIME_DIR', '/tmp')) / f'voice-dictation-{os.getuid()}'
 MODEL = os.environ.get('VOICE_MODEL', 'openai/whisper-large-v3-turbo')
@@ -65,8 +66,11 @@ def transcribe(audio, api_key):
 def record():
     recorder = None
     stopping = False
+    stopped_at = None
     def stop(signum, frame):
-        nonlocal stopping
+        nonlocal stopping, stopped_at
+        if stopped_at is None:
+            stopped_at = time.monotonic()
         stopping = True
         if recorder and recorder.poll() is None:
             recorder.send_signal(signal.SIGINT)
@@ -94,23 +98,40 @@ def record():
             if stopping:
                 recorder.send_signal(signal.SIGINT)
             recorder.wait()
+            recorded_at = time.monotonic()
             if not stopping or not audio.exists() or audio.stat().st_size < 1000:
                 raise RuntimeError('Запись не получилась или слишком короткая.')
             notify('Распознаю речь…')
             started = time.monotonic()
             text = transcribe(audio, api_key)
+            api_done = time.monotonic()
             if not text:
                 raise RuntimeError('Сервис вернул пустой текст.')
             subprocess.run(['wl-copy', '--', text], check=True)
             current = focused_window()
+            outcome = 'clipboard'
             if window and current and window.get('id') == current.get('id'):
                 try:
                     paste(current)
+                    outcome = 'paste_requested'
+                    done = time.monotonic()
                     notify(f'Команда вставки отправлена ({time.monotonic() - started:.1f} с).')
                 except (OSError, ImportError):
+                    done = time.monotonic()
                     notify('Не удалось вставить текст; он в буфере обмена.')
             else:
+                done = time.monotonic()
                 notify('Фокус изменился: текст сохранён в буфер обмена.')
+            with wave.open(str(audio), 'rb') as wav:
+                audio_seconds = wav.getnframes() / wav.getframerate()
+            metrics = {'model': MODEL, 'audio_seconds': round(audio_seconds, 3),
+                       'stop_to_recorded_seconds': round(recorded_at - stopped_at, 3),
+                       'api_seconds': round(api_done - started, 3),
+                       'post_api_seconds': round(done - api_done, 3),
+                       'signal_to_result_seconds': round(done - stopped_at, 3),
+                       'outcome': outcome}
+            with (STATE / 'timings.jsonl').open('a', encoding='utf-8') as timings:
+                timings.write(json.dumps(metrics) + '\n')
             print('Транскрибация завершена.')
     except (OSError, RuntimeError, ValueError, KeyError, urllib.error.URLError, subprocess.CalledProcessError) as exc:
         print(f'Ошибка: {exc}', file=sys.stderr)
