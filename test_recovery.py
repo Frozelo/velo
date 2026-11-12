@@ -122,6 +122,32 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(json.loads((saved / 'session.json').read_text())['status'], 'cancelled')
         self.assertEqual((saved / 'audio.pcm').stat().st_size, 1000)
 
+    def test_empty_silent_tail_is_cached_with_usage(self):
+        with patch.object(voice, 'transcribe', return_value=('', {'cost': .001})) as api:
+            self.assertEqual(sessions.transcribe(self.path, bytes(1000), 0, 'dummy'), ('', {'cost': .001}))
+            sessions.transcribe(self.path, bytes(1000), 0, 'dummy')
+            self.assertEqual(api.call_count, 1)
+
+    def test_empty_tail_with_isolated_noise_peak_is_valid(self):
+        pcm = bytearray(14400)
+        pcm[100:102] = (70).to_bytes(2, 'little', signed=True)
+        with patch.object(voice, 'transcribe', return_value=('', {'cost': .001})):
+            self.assertEqual(sessions.transcribe(self.path, bytes(pcm), 0, 'dummy')[0], '')
+
+    def test_empty_response_for_audible_audio_is_error(self):
+        with patch.object(voice, 'transcribe', return_value=('', {})):
+            with self.assertRaises(ValueError):
+                sessions.transcribe(self.path, b'\xff\x7f' * 500, 0, 'dummy')
+
+    def test_empty_fragment_falls_back_to_full_audio(self):
+        (self.path / 'audio.pcm').write_bytes(b'\xff\x7f' * 500)
+        with patch.object(voice, 'transcribe', side_effect=[('', {'cost': .001}), ('Полный текст', {'cost': .002})]) as api:
+            self.assertEqual(recover.resume(self.path, 'dummy'), 'Полный текст')
+            self.assertEqual(api.call_count, 2)
+            self.assertEqual(recover.resume(self.path, 'dummy'), 'Полный текст')
+            self.assertEqual(api.call_count, 2)
+        self.assertAlmostEqual(sessions.account(self.path, 'disabled')['known_usd'], .003)
+
     def test_permissions(self):
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o700)
         self.assertEqual((self.path / 'session.json').stat().st_mode & 0o777, 0o600)

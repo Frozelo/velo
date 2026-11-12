@@ -20,16 +20,32 @@ def resume(path, api_key):
     audio = path / 'audio.pcm'
     if not audio.exists():
         raise ValueError('Нет записи для восстановления')
+    total = audio.stat().st_size // 2 * 2
+    manifest = path / 'boundaries.json'
+    if manifest.exists():
+        boundaries = json.loads(manifest.read_text())
+        previous = 0
+        for end in boundaries:
+            if not isinstance(end, int) or end % 2 or not previous < end <= total:
+                raise ValueError('Повреждены границы фрагментов; запись сохранена')
+            previous = end
+        if total > previous:
+            boundaries.append(total)
+            sessions.write(manifest, boundaries)
+    else:
+        # Sessions created before pause-aware segmentation used fixed slices.
+        boundaries = list(range(CHUNK_BYTES, total, CHUNK_BYTES)) + ([total] if total else [])
     parts = []
+    previous = 0
     with audio.open('rb') as f:
-        number = 0
-        while pcm := f.read(CHUNK_BYTES):
-            pcm = pcm[:len(pcm) // 2 * 2]
-            if not pcm:
-                break
-            text, _ = sessions.transcribe(path, pcm, number, api_key)
+        for number, end in enumerate(boundaries):
+            pcm = f.read(end - previous)
+            try:
+                text, _ = sessions.transcribe(path, pcm, number, api_key)
+            except sessions.EmptyTranscriptError:
+                return sessions.full_transcript(path, api_key)
             parts.append(text)
-            number += 1
+            previous = end
     if not parts:
         raise ValueError('Сохранённая запись пуста')
     text = ' '.join(parts)

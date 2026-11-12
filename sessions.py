@@ -1,5 +1,6 @@
 """Persistent local dictation sessions and resumable fragment processing."""
 import contextlib
+from segmenter import is_quiet
 import fcntl
 import json
 import os
@@ -10,6 +11,10 @@ import urllib.error
 import uuid
 from datetime import datetime, timezone
 import voice
+
+class EmptyTranscriptError(ValueError):
+    pass
+
 
 ROOT = Path(os.environ.get('XDG_STATE_HOME', Path.home() / '.local/state')) / 'velo' / 'sessions'
 
@@ -88,7 +93,9 @@ def transcribe(path, pcm, number, api_key):
     audio.write_bytes(wav_bytes(pcm))
     text, usage = retry(lambda: voice.transcribe(audio, api_key, language='ru', return_usage=True), path / f'attempts-{number:06d}.jsonl')
     if not text:
-        raise ValueError('Пустой ответ распознавания')
+        if not is_quiet(pcm):
+            write(path / f'empty-{number:06d}.json', {'usage': usage})
+            raise EmptyTranscriptError('Пустой ответ распознавания при наличии звука')
     write(target, {'text': text, 'usage': usage})
     audio.unlink(missing_ok=True)
     return text, usage
@@ -124,7 +131,28 @@ def cleanup(hours=24):
 def account(path, edit_status):
     import cost_stats
     chunks = [json.loads(p.read_text())['usage'] for p in sorted(path.glob('chunk-*.json'))]
+    chunks.extend(json.loads(p.read_text())['usage'] for p in sorted(path.glob('empty-*.json')))
+    full = path / 'full-usage.json'
+    if full.exists():
+        chunks.append(json.loads(full.read_text()))
     usage = path / 'edit-usage.json'
     editor = json.loads(usage.read_text()) if usage.exists() else None
     uncertain = any(path.glob('attempts-*.jsonl'))
     return cost_stats.save(chunks, editor, edit_status, session_id=path.name, uncertain=uncertain)
+
+
+def full_transcript(path, api_key):
+    """Recover context when a fragment returns no words despite audible input."""
+    from chunked import wav_bytes
+    raw = path / 'raw.json'
+    if raw.exists():
+        return json.loads(raw.read_text())['text']
+    pcm = (path / 'audio.pcm').read_bytes()
+    audio = path / 'full.wav'
+    audio.write_bytes(wav_bytes(pcm[:len(pcm) // 2 * 2]))
+    text, usage = retry(lambda: voice.transcribe(audio, api_key, language='ru', return_usage=True), path / 'attempts-full.jsonl')
+    write(path / 'full-usage.json', usage)
+    if not text:
+        raise EmptyTranscriptError('Не удалось распознать и полную запись; аудио сохранено')
+    save_text(path, text)
+    return text

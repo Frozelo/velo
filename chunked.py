@@ -16,6 +16,7 @@ import polish
 import cost_stats
 import sessions
 import ui_state as status_ui
+from segmenter import Segmenter
 
 RATE = 16000
 CHUNK_BYTES = RATE * 2 * 5
@@ -89,7 +90,9 @@ def run(insert):
         voice.notify('Запись началась. Отпусти клавишу, чтобы закончить.')
     else:
         print('Говори. Нажми Ctrl+C, чтобы закончить.', flush=True)
-    buffer = bytearray()
+    segmenter = Segmenter()
+    boundaries = []
+    sessions.write(session / 'boundaries.json', boundaries)
     futures = []
     try:
         with contextlib.ExitStack() as stack:
@@ -102,11 +105,10 @@ def run(insert):
                 if not data:
                     break
                 journal.write(data)
-                buffer.extend(data)
-                while len(buffer) >= CHUNK_BYTES:
+                for pcm in segmenter.feed(data):
                     os.fsync(journal.fileno())
-                    pcm = bytes(buffer[:CHUNK_BYTES])
-                    del buffer[:CHUNK_BYTES]
+                    boundaries.append((boundaries[-1] if boundaries else 0) + len(pcm))
+                    sessions.write(session / 'boundaries.json', boundaries)
                     futures.append(pool.submit(send_chunk, pcm, api_key, tmp, len(futures)))
             process.wait()
             os.fsync(journal.fileno())
@@ -116,15 +118,26 @@ def run(insert):
             check_cancel()
             if stopped_at is None:
                 raise RuntimeError('Запись прервалась до остановки.')
-            if len(buffer) >= 2:
-                futures.append(pool.submit(send_chunk, bytes(buffer[:len(buffer) // 2 * 2]), api_key, tmp, len(futures)))
+            tail = segmenter.finish()
+            if tail:
+                boundaries.append((boundaries[-1] if boundaries else 0) + len(tail))
+                sessions.write(session / 'boundaries.json', boundaries)
+                futures.append(pool.submit(send_chunk, tail, api_key, tmp, len(futures)))
             if not futures:
                 raise RuntimeError('Запись слишком короткая.')
             # Never insert an incomplete transcript when a request fails.
-            results = [future.result() for future in futures]
+            concurrent.futures.wait(futures)
             check_cancel()
-            parts = [result[0] for result in results]
-            text = ' '.join(part.strip() for part in parts if part.strip())
+            errors = [future.exception() for future in futures if future.exception() is not None]
+            other_errors = [error for error in errors if not isinstance(error, sessions.EmptyTranscriptError)]
+            if other_errors:
+                raise other_errors[0]
+            if errors:
+                text = sessions.full_transcript(session, api_key)
+            else:
+                results = [future.result() for future in futures]
+                parts = [result[0] for result in results]
+                text = ' '.join(part.strip() for part in parts if part.strip())
             if not text:
                 raise RuntimeError('Сервис вернул пустой текст.')
             sessions.save_text(session, text)
@@ -167,7 +180,7 @@ def run(insert):
             if insert:
                 status_ui.publish('ready', session.name)
             with (voice.STATE / 'chunked-timings.jsonl').open('a', encoding='utf-8') as f:
-                f.write(json.dumps({'chunks': len(futures), 'stop_to_text_seconds': round(elapsed, 3),
+                f.write(json.dumps({'chunks': len(futures), 'segmentation': 'pause-v1', 'chunk_seconds': [(end - (boundaries[i-1] if i else 0)) / (RATE * 2) for i, end in enumerate(boundaries)], 'stop_to_text_seconds': round(elapsed, 3),
                     'edit_seconds': round(edit_seconds, 3) if edit_seconds is not None else None,
                     'edit_status': edit_status, 'stop_to_delivery_seconds': round(time.monotonic() - stopped_at, 3)}) + '\n')
     except Exception as exc:
