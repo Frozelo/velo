@@ -1,0 +1,11 @@
+[Unit]
+Description=Velo push-to-talk keyboard listener
+After=graphical-session.target
+
+[Service]
+ExecStart=/usr/bin/python3 /home/ivan/Projects/voice-dictation/hold.py
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
