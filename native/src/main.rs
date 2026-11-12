@@ -217,6 +217,7 @@ fn main() -> Result<()> {
     }
     let args: Vec<_> = env::args().collect();
     match args.get(1).map(String::as_str) {
+        Some("--version") => println!("velo-native {}", env!("CARGO_PKG_VERSION")),
         Some("--doctor") => {
             linux::check_input()?;
             println!("GTK4: compiled; PipeWire: native backend; API keys are not read by doctor");
