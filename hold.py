@@ -10,6 +10,7 @@ import time
 from evdev import InputDevice, ecodes, list_devices
 
 VOICE = Path(__file__).with_name('voice.py')
+CHUNKED = Path(__file__).with_name('chunked.py')
 child = None
 running = True
 
@@ -41,7 +42,8 @@ while running:
                 if event.type != ecodes.EV_KEY or event.code != ecodes.KEY_F24:
                     continue
                 if event.value == 1 and (child is None or child.poll() is not None):
-                    child = subprocess.Popen([sys.executable, str(VOICE), 'record'])
+                    command = [sys.executable, str(VOICE), 'record'] if os.environ.get('VELO_MODE') == 'batch' else [sys.executable, str(CHUNKED), '--insert']
+                    child = subprocess.Popen(command)
                 elif event.value == 0 and child is not None and child.poll() is None:
                     # Give record.py time to install its signal handler on quick taps.
                     time.sleep(0.15)
